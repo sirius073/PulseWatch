@@ -1,0 +1,24 @@
+version: "3.8"
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: pulsewatch-timescaledb
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-pulsewatch}
+      POSTGRES_USER: ${POSTGRES_USER:-pulsewatch}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pulsewatch_secret}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pulsewatch} -d ${POSTGRES_DB:-pulsewatch}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  timescaledb_data:
+    name: pulsewatch_timescaledb_data

@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package pulsewatch.v1;
+
+option go_package = "pulsewatch/proto/v1;pulsewatchv1";
+
+// Individual system metric reading (CPU, memory, disk, network, process)
+message MetricPoint {
+  // Metric identifier (e.g., "system.cpu.utilization", "system.memory.used_bytes")
+  string name = 1;
+
+  // Numerical value of the metric
+  double value = 2;
+
+  // Epoch timestamp in milliseconds when the metric was collected
+  int64 timestamp_unix_ms = 3;
+
+  // Dimension key-values (e.g., {"core": "0"}, {"mount": "/"}, {"process_name": "postgres"})
+  map<string, string> labels = 4;
+}
+
+// Batched transmission sent from agent to ingest server
+message MetricBatch {
+  // Stable unique identifier for the host (e.g., machine-id, hardware UUID)
+  string host_id = 1;
+
+  // Monotonically increasing sequence number per host (used for deduplication & idempotency)
+  uint64 seq = 2;
+
+  // Timestamp when the batch was dispatched from the agent
+  int64 sent_at_unix_ms = 3;
+
+  // Slice of collected metric points
+  repeated MetricPoint points = 4;
+}
+
+// Delivery confirmation status
+enum AckStatus {
+  ACK_STATUS_UNSPECIFIED = 0;
+  // Batch was successfully committed to the database
+  ACK_STATUS_COMMITTED = 1;
+  // Batch was previously committed; acknowledged idempotently without re-inserting
+  ACK_STATUS_DUPLICATE = 2;
+  // Transient backpressure / queue full; agent should back off and retry
+  ACK_STATUS_RETRYABLE_ERROR = 3;
+  // Payload failed authentication or validation (unrecoverable error)
+  ACK_STATUS_REJECTED = 4;
+}
+
+// Acknowledgment returned only after durable database commit (deferred ack)
+message BatchAck {
+  string host_id = 1;
+  uint64 seq = 2;
+  AckStatus status = 3;
+  string error_message = 4;
+}
+
+// Heartbeat payload for host registration, liveness tracking, and metadata
+message HeartbeatRequest {
+  string host_id = 1;
+  string hostname = 2;
+  string os = 3;
+  string arch = 4;
+  string agent_version = 5;
+  int64 timestamp_unix_ms = 6;
+  map<string, string> host_labels = 7;
+}
+
+// Heartbeat response returned by the ingest server
+message HeartbeatResponse {
+  bool acknowledged = 1;
+  int64 server_time_unix_ms = 2;
+}
+
+// Primary gRPC ingestion and liveness service
+service MetricsIngestService {
+  // Ingests a batch of metric points.
+  // The server returns an Ack ONLY after durable database commit.
+  rpc IngestBatch(MetricBatch) returns (BatchAck);
+
+  // Periodic heartbeat confirming host online status and metadata
+  rpc SendHeartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}
