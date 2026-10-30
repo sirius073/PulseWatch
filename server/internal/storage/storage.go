@@ -363,3 +363,166 @@ func (s *Storage) ListHosts(ctx context.Context) ([]HostRecord, error) {
 	}
 	return hosts, rows.Err()
 }
+
+// ─── Range Query ──────────────────────────────────────────────────────────────
+
+// QueryRangeParams mirrors api.QueryRangeParams but lives here to avoid
+// an import cycle (storage ← api). The api package converts between them.
+type QueryRangeParams struct {
+	HostID     string
+	MetricName string
+	From       time.Time
+	To         time.Time
+	// Table is "raw" or "rollup_1m", chosen by api.TableFor().
+	Table string
+	// Step bucket: "1m", "5m", "1h" — used for time_bucket() on rollup queries.
+	Step string
+	// Agg: "avg", "min", "max", "sum"
+	Agg string
+}
+
+// DataPoint is a single timestamped value returned from a range query.
+type DataPoint struct {
+	Ts    time.Time `json:"ts"`
+	Value float64   `json:"value"`
+}
+
+// QueryRange fetches aggregated time-series data for a single metric on one host.
+//
+// For raw windows (≤6 h) it queries the `metrics` hypertable directly and
+// returns every stored row (no bucketing). For wider windows it queries the
+// `metrics_rollup_1m` continuous aggregate and applies time_bucket() with the
+// requested Step so the client always gets a manageable number of points.
+//
+// Rollup averages are computed as SUM(sum_val)/SUM(count_val) to avoid the
+// avg-of-avgs problem.
+func (s *Storage) QueryRange(ctx context.Context, p QueryRangeParams) ([]DataPoint, error) {
+	switch p.Table {
+	case "raw":
+		return s.queryRaw(ctx, p)
+	default:
+		return s.queryRollup(ctx, p)
+	}
+}
+
+// queryRaw reads directly from the metrics hypertable.
+// It returns every individual point in the window — no bucketing.
+func (s *Storage) queryRaw(ctx context.Context, p QueryRangeParams) ([]DataPoint, error) {
+	// We resolve metric_id and host labels via the interned caches.
+	// For a query we go back to the DB since the cache may be cold on restart.
+	query := `
+		SELECT m.ts, m.value
+		FROM metrics m
+		JOIN metric_definitions md ON md.id = m.metric_id
+		JOIN hosts h ON h.host_id = m.host_id
+		WHERE h.host_id = $1
+		  AND md.name   = $2
+		  AND m.ts      >= $3
+		  AND m.ts      <  $4
+		ORDER BY m.ts ASC;
+	`
+	rows, err := s.pool.Query(ctx, query, p.HostID, p.MetricName, p.From, p.To)
+	if err != nil {
+		return nil, fmt.Errorf("queryRaw: %w", err)
+	}
+	defer rows.Close()
+
+	var pts []DataPoint
+	for rows.Next() {
+		var dp DataPoint
+		if err := rows.Scan(&dp.Ts, &dp.Value); err != nil {
+			return nil, err
+		}
+		pts = append(pts, dp)
+	}
+	return pts, rows.Err()
+}
+
+// queryRollup reads from metrics_rollup_1m and applies time_bucket() so the
+// response is already bucketed at the requested step size.
+// Averages use SUM(sum_val)/SUM(count_val) — never avg of avgs.
+func (s *Storage) queryRollup(ctx context.Context, p QueryRangeParams) ([]DataPoint, error) {
+	// Map the Step string to a Postgres interval literal.
+	interval, err := stepToInterval(p.Step)
+	if err != nil {
+		return nil, err
+	}
+
+	// Choose the aggregation expression. For "avg" we use sum/count math.
+	var aggExpr string
+	switch p.Agg {
+	case "min":
+		aggExpr = "MIN(min_val)"
+	case "max":
+		aggExpr = "MAX(max_val)"
+	case "sum":
+		aggExpr = "SUM(sum_val)"
+	default: // "avg"
+		aggExpr = "SUM(sum_val) / NULLIF(SUM(count_val), 0)"
+	}
+
+	query := fmt.Sprintf(`
+		SELECT time_bucket($1::interval, bucket) AS tb,
+		       %s AS val
+		FROM metrics_rollup_1m r
+		JOIN metric_definitions md ON md.id = r.metric_id
+		JOIN hosts h               ON h.host_id = r.host_id
+		WHERE h.host_id = $2
+		  AND md.name   = $3
+		  AND r.bucket  >= $4
+		  AND r.bucket  <  $5
+		GROUP BY tb
+		ORDER BY tb ASC;
+	`, aggExpr)
+
+	rows, err := s.pool.Query(ctx, query, interval, p.HostID, p.MetricName, p.From, p.To)
+	if err != nil {
+		return nil, fmt.Errorf("queryRollup: %w", err)
+	}
+	defer rows.Close()
+
+	var pts []DataPoint
+	for rows.Next() {
+		var dp DataPoint
+		if err := rows.Scan(&dp.Ts, &dp.Value); err != nil {
+			return nil, err
+		}
+		pts = append(pts, dp)
+	}
+	return pts, rows.Err()
+}
+
+// stepToInterval converts our Step string to a Postgres interval string.
+func stepToInterval(step string) (string, error) {
+	switch step {
+	case "1m":
+		return "1 minute", nil
+	case "5m":
+		return "5 minutes", nil
+	case "1h":
+		return "1 hour", nil
+	default:
+		return "", fmt.Errorf("unsupported step %q: use 1m, 5m, or 1h", step)
+	}
+}
+
+// QueryLatestValue returns just the scalar value and timestamp of the most
+// recent reading of a metric. Used by the SSE streaming handler.
+func (s *Storage) QueryLatestValue(ctx context.Context, hostID, metricName string) (float64, time.Time, error) {
+	query := `
+		SELECT m.value, m.ts
+		FROM metrics m
+		JOIN metric_definitions md ON md.id = m.metric_id
+		WHERE m.host_id = $1
+		  AND md.name   = $2
+		ORDER BY m.ts DESC
+		LIMIT 1;
+	`
+	var val float64
+	var ts time.Time
+	err := s.pool.QueryRow(ctx, query, hostID, metricName).Scan(&val, &ts)
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("QueryLatestValue: %w", err)
+	}
+	return val, ts, nil
+}

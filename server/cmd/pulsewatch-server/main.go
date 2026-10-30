@@ -10,10 +10,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	pulsewatchv1 "pulsewatch/proto/v1"
+	"pulsewatch/server/internal/api"
 	"pulsewatch/server/internal/buffer"
 	"pulsewatch/server/internal/ingest"
 	"pulsewatch/server/internal/reaper"
@@ -133,11 +135,164 @@ func main() {
 		_ = json.NewEncoder(w).Encode(record)
 	})
 
+	// ── Range query endpoint ───────────────────────────────────────────────────
+	// GET /api/v1/metrics/range?host=&metric=&from=&to=&step=&agg=
+	//
+	// from/to: RFC3339 timestamps (optional — defaults to last 1h)
+	// step:    1m | 5m | 1h  (optional — auto-selected based on window)
+	// agg:     avg | min | max | sum  (optional — default avg)
+	//
+	// The handler auto-selects raw vs rollup table based on window size.
+	mux.HandleFunc("/api/v1/metrics/range", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+
+		p := api.QueryRangeParams{
+			HostID:     q.Get("host"),
+			MetricName: q.Get("metric"),
+			Step:       q.Get("step"),
+			Agg:        q.Get("agg"),
+		}
+
+		if fromStr := q.Get("from"); fromStr != "" {
+			t, err := time.Parse(time.RFC3339, fromStr)
+			if err != nil {
+				http.Error(w, `{"error": "invalid 'from' timestamp, use RFC3339"}`, http.StatusBadRequest)
+				return
+			}
+			p.From = t
+		}
+		if toStr := q.Get("to"); toStr != "" {
+			t, err := time.Parse(time.RFC3339, toStr)
+			if err != nil {
+				http.Error(w, `{"error": "invalid 'to' timestamp, use RFC3339"}`, http.StatusBadRequest)
+				return
+			}
+			p.To = t
+		}
+
+		if err := api.ValidateRangeParams(&p); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error": %q}`, err.Error()), http.StatusBadRequest)
+			return
+		}
+
+		// Convert api.QueryRangeParams → storage.QueryRangeParams.
+		// The table selection lives in the api package so storage stays DB-only.
+		sp := storage.QueryRangeParams{
+			HostID:     p.HostID,
+			MetricName: p.MetricName,
+			From:       p.From,
+			To:         p.To,
+			Table:      api.TableFor(p.From, p.To),
+			Step:       p.Step,
+			Agg:        p.Agg,
+		}
+
+		pts, err := store.QueryRange(r.Context(), sp)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error": %q}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
+		if pts == nil {
+			pts = []storage.DataPoint{} // never return null to the client
+		}
+
+		result := struct {
+			HostID     string             `json:"host_id"`
+			MetricName string             `json:"metric_name"`
+			From       time.Time          `json:"from"`
+			To         time.Time          `json:"to"`
+			Step       string             `json:"step"`
+			Agg        string             `json:"agg"`
+			Table      string             `json:"table"`
+			Points     []storage.DataPoint `json:"points"`
+		}{
+			HostID:     p.HostID,
+			MetricName: p.MetricName,
+			From:       p.From,
+			To:         p.To,
+			Step:       p.Step,
+			Agg:        p.Agg,
+			Table:      sp.Table,
+			Points:     pts,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(result)
+	})
+
+	// ── SSE streaming endpoint ─────────────────────────────────────────────────
+	// GET /api/v1/stream/metrics?host=&metric=&interval=5
+	//
+	// Pushes Server-Sent Events with the latest metric value every `interval`
+	// seconds (default 5). SSE is simpler than WebSocket for one-way streaming:
+	// the browser's EventSource API handles reconnection automatically.
+	//
+	// Each event:   data: {"ts":"...","value":42.1}\n\n
+	mux.HandleFunc("/api/v1/stream/metrics", func(w http.ResponseWriter, r *http.Request) {
+		hostID := r.URL.Query().Get("host")
+		metricName := r.URL.Query().Get("metric")
+		if hostID == "" || metricName == "" {
+			http.Error(w, `{"error": "host and metric are required"}`, http.StatusBadRequest)
+			return
+		}
+		intervalSec := 5
+		if iv := r.URL.Query().Get("interval"); iv != "" {
+			if n, err := strconv.Atoi(iv); err == nil && n >= 1 && n <= 60 {
+				intervalSec = n
+			}
+		}
+
+		// SSE headers — no buffering, keep-alive, CORS for the frontend dev server.
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming not supported", http.StatusInternalServerError)
+			return
+		}
+
+		ticker := time.NewTicker(time.Duration(intervalSec) * time.Second)
+		defer ticker.Stop()
+
+		// Send one event immediately so the client doesn't wait for the first tick.
+		sendSSEEvent := func() {
+			val, ts, err := store.QueryLatestValue(r.Context(), hostID, metricName)
+			if err != nil {
+				// Metric not found yet — send a keepalive comment instead.
+				fmt.Fprintf(w, ": waiting for data\n\n")
+				flusher.Flush()
+				return
+			}
+			payload, _ := json.Marshal(map[string]interface{}{
+				"ts":    ts.Format(time.RFC3339),
+				"value": val,
+			})
+			fmt.Fprintf(w, "data: %s\n\n", payload)
+			flusher.Flush()
+		}
+
+		sendSSEEvent()
+
+		for {
+			select {
+			case <-r.Context().Done():
+				return // client disconnected
+			case <-ticker.C:
+				sendSSEEvent()
+			}
+		}
+	})
+
 	httpServer := &http.Server{
-		Addr:         ":" + httpPort,
-		Handler:      mux,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 5 * time.Second,
+		Addr:        ":" + httpPort,
+		Handler:     mux,
+		ReadTimeout: 5 * time.Second,
+		// WriteTimeout must be 0 (no timeout) because SSE connections are
+		// long-lived. A non-zero value would kill the stream after the timeout.
+		WriteTimeout: 0,
 	}
 
 	go func() {

@@ -133,7 +133,7 @@ curl http://localhost:8080/metrics
 - [x] Phase 2 — Walking Skeleton (CPU → gRPC → TimescaleDB end-to-end)
 - [x] Phase 3 — Reliability Core (WAL, backoff, deferred acks, chaos test)
 - [x] Phase 4 — Widen (all collectors, heartbeats, rollups, /metrics)
-- [ ] Phase 5 — Query API & Live Dashboard
+- [x] Phase 5 — Query API & Live Dashboard
 - [ ] Phase 6 — Alerting & Streaming Detection
 - [ ] Phase 7 — Load Generator & Evaluation
 - [ ] Phase 8 — Python ML Sidecar

@@ -1,0 +1,148 @@
+/* PulseWatch global styles — dark monitoring dashboard theme */
+
+:root {
+  --bg:        #0d1117;
+  --surface:   #161b22;
+  --border:    #30363d;
+  --text:      #e6edf3;
+  --muted:     #8b949e;
+  --accent:    #58a6ff;
+  --green:     #3fb950;
+  --red:       #f85149;
+  --yellow:    #d29922;
+  --font-mono: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ── Layout ── */
+.layout {
+  display: grid;
+  grid-template-rows: 48px 1fr;
+  min-height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.topbar h1 { font-size: 16px; font-weight: 600; letter-spacing: 0.5px; }
+.topbar nav { display: flex; gap: 20px; margin-left: auto; }
+.topbar nav a { color: var(--muted); font-size: 13px; }
+.topbar nav a.active { color: var(--text); }
+
+.page { padding: 24px; }
+
+/* ── Cards ── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+/* ── Status badges ── */
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.badge-online  { background: #0d4429; color: var(--green); }
+.badge-offline { background: #3d1c1c; color: var(--red); }
+
+/* ── Host grid ── */
+.host-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+  margin-top: 20px;
+}
+
+.host-card {
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.host-card:hover { border-color: var(--accent); }
+
+.host-card h3 { font-size: 15px; margin-bottom: 8px; }
+.host-card .meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
+
+/* ── Metric charts ── */
+.charts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(480px, 1fr));
+  gap: 20px;
+  margin-top: 20px;
+}
+
+.chart-card h4 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 12px;
+}
+
+.chart-value {
+  font-size: 28px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--accent);
+}
+.chart-unit { font-size: 13px; color: var(--muted); margin-left: 4px; }
+
+/* ── uPlot overrides (dark theme) ── */
+.uplot, .uplot * { font-family: var(--font-mono); }
+.u-wrap { border-radius: 6px; overflow: hidden; }
+
+/* ── Loading / error states ── */
+.loading { color: var(--muted); padding: 40px; text-align: center; }
+.error-msg { color: var(--red); padding: 12px; }
+
+/* ── Live indicator ── */
+.live-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  animation: pulse-dot 2s infinite;
+  display: inline-block;
+  margin-right: 6px;
+}
+@keyframes pulse-dot {
+  0%,100% { opacity: 1; }
+  50%      { opacity: 0.3; }
+}
+
+/* ── Back button ── */
+.back-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  margin-bottom: 20px;
+}
+.back-btn:hover { border-color: var(--accent); color: var(--accent); }
