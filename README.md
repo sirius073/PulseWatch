@@ -5,19 +5,19 @@ A real-time distributed system monitoring platform built in Go with a Python ML 
 ## Architecture
 
 ```
-┌─────────────────┐      gRPC / TLS      ┌──────────────────────┐
-│   Agent (Go)    │ ──────────────────► │   Server (Go)        │
-│                 │                      │                      │
-│  • CPU          │   MetricBatch        │  • gRPC ingest       │
-│  • Memory       │   + WAL durability   │  • Deferred acks     │
-│  • Disk         │   + backoff/jitter   │  • DB-level dedup    │
-│  • Network      │                      │  • TimescaleDB       │
-│  • Processes    │◄─────────────────── │  • Rollup aggregates │
-└─────────────────┘      BatchAck        └──────────┬───────────┘
+┌─────────────────┐      gRPC / TLS       ┌──────────────────────┐
+│   Agent (Go)    │  ──────────────────►  │   Server (Go)        │
+│                 │                       │                      │
+│  • CPU          │   MetricBatch         │  • gRPC ingest       │
+│  • Memory       │   + WAL durability    │  • Deferred acks     │
+│  • Disk         │   + backoff/jitter    │  • DB-level dedup    │
+│  • Network      │                       │  • TimescaleDB       │
+│  • Processes    │  ◄──────────────────  │  • Rollup aggregates │
+└─────────────────┘      BatchAck         └──────────┬───────────┘
                                                      │
                          ┌───────────────────────────┤
                          │                           │
-              ┌──────────▼──────────┐   ┌───────────▼──────────┐
+              ┌───────── ▼ ─────────┐   ┌─────────── ▼ ────────┐
               │  Python ML Sidecar  │   │  React Dashboard     │
               │                     │   │                      │
               │  • Runway forecaster│   │  • Host inventory    │
