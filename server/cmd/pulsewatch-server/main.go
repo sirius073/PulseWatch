@@ -8,10 +8,13 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -365,6 +368,19 @@ func main() {
 			})
 		}
 	})
+
+	// ── Proxy to Python ML Predictive Sidecar ────────────────────────────────
+	sidecarURL := os.Getenv("PULSEWATCH_SIDECAR_URL")
+	if sidecarURL == "" {
+		sidecarURL = "http://localhost:8000"
+	}
+	if target, err := url.Parse(sidecarURL); err == nil {
+		proxy := httputil.NewSingleHostReverseProxy(target)
+		mux.HandleFunc("/api/v1/predict/", func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api/v1")
+			proxy.ServeHTTP(w, r)
+		})
+	}
 
 	// ── Static SPA frontend serving ──────────────────────────────────────────
 	if _, err := os.Stat("frontend/dist"); err == nil {

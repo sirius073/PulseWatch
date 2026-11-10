@@ -136,7 +136,20 @@ curl http://localhost:8080/metrics
 - [x] Phase 5 — Query API & Live Dashboard
 - [x] Phase 6 — Alerting & Streaming Detection
 - [x] Phase 7 — Load Generator & Evaluation
-- [ ] Phase 8 — Python ML Sidecar
+- [x] Phase 8 — Python ML Sidecar
+
+### Running the Python ML Predictive Sidecar
+
+```bash
+# Install dependencies
+pip install -r sidecar/requirements.txt
+
+# Run FastAPI sidecar server (port 8000)
+python -m uvicorn sidecar.main:app --host 0.0.0.0 --port 8000 --reload
+
+# Run ML test suite
+pytest sidecar/tests
+```
 
 ## Chaos Test Results
 

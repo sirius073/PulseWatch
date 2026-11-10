@@ -141,18 +141,47 @@ export function HostDetail() {
   }
 
   const decodedId = decodeURIComponent(hostId!)
+  const [runway, setRunway] = useState<any>(null)
+
+  useEffect(() => {
+    fetch(`/api/v1/predict/runway?host=${encodeURIComponent(decodedId)}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d && d.forecast) setRunway(d.forecast) })
+      .catch(() => {})
+  }, [decodedId])
 
   return (
     <div className="page">
       <button className="back-btn" onClick={() => navigate('/')}>← Back</button>
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
         <h2 style={{ fontSize: 20 }}>{host.hostname}</h2>
         <span className={`badge badge-${host.status}`}>{host.status}</span>
         <span style={{ color: 'var(--muted)', fontSize: 12 }}>
           {host.os} / {host.arch} · agent {host.agent_version}
         </span>
       </div>
+
+      {runway && (
+        <div className="card" style={{ marginBottom: 20, borderLeft: '4px solid var(--accent)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <strong>🤖 AI Runway Forecast (Disk Capacity)</strong>
+            <span className="badge" style={{
+              background: runway.status === 'critical' ? 'var(--red)' : 'var(--green)',
+              color: '#fff'
+            }}>
+              {runway.status.toUpperCase()}
+            </span>
+          </div>
+          <p style={{ marginTop: 6, fontSize: 13 }}>{runway.message}</p>
+          <div style={{ marginTop: 6, fontSize: 12, color: 'var(--muted)' }}>
+            Growth rate: <code>{runway.growth_rate_per_hour}%/h</code> · Model confidence R²: <code>{runway.r2_score}</code>
+            {runway.hours_to_exhaustion && (
+              <span> · Time to 100%: <strong>{runway.hours_to_exhaustion} hours</strong></span>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="charts-grid">
         {CHARTS.map(cfg => (
