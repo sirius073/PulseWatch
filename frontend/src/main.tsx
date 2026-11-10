@@ -4,6 +4,7 @@ import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom'
 import './index.css'
 import { Hosts } from './pages/Hosts'
 import { HostDetail } from './pages/HostDetail'
+import { Alerts } from './pages/Alerts'
 
 function Layout() {
   return (
@@ -15,12 +16,16 @@ function Layout() {
           <NavLink to="/" end className={({ isActive }) => isActive ? 'active' : ''}>
             Hosts
           </NavLink>
+          <NavLink to="/alerts" className={({ isActive }) => isActive ? 'active' : ''}>
+            Alerts & Anomalies
+          </NavLink>
         </nav>
       </header>
       <main>
         <Routes>
           <Route path="/" element={<Hosts />} />
           <Route path="/hosts/:hostId" element={<HostDetail />} />
+          <Route path="/alerts" element={<Alerts />} />
         </Routes>
       </main>
     </div>

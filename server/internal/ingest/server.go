@@ -7,6 +7,7 @@ import (
 	"time"
 
 	pulsewatchv1 "pulsewatch/proto/v1"
+	"pulsewatch/server/internal/alert"
 	"pulsewatch/server/internal/buffer"
 	"pulsewatch/server/internal/storage"
 	"pulsewatch/server/internal/telemetry"
@@ -18,15 +19,17 @@ import (
 // Server implements the gRPC MetricsIngestService.
 type Server struct {
 	pulsewatchv1.UnimplementedMetricsIngestServiceServer
-	store *storage.Storage
-	queue *buffer.Queue
+	store       *storage.Storage
+	queue       *buffer.Queue
+	alertEngine *alert.Engine
 }
 
-// NewServer constructs an ingestion server backed by the storage engine and worker queue.
-func NewServer(store *storage.Storage, queue *buffer.Queue) *Server {
+// NewServer constructs an ingestion server backed by the storage engine, worker queue, and alert engine.
+func NewServer(store *storage.Storage, queue *buffer.Queue, alertEngine *alert.Engine) *Server {
 	return &Server{
-		store: store,
-		queue: queue,
+		store:       store,
+		queue:       queue,
+		alertEngine: alertEngine,
 	}
 }
 
@@ -67,6 +70,17 @@ func (s *Server) IngestBatch(ctx context.Context, req *pulsewatchv1.MetricBatch)
 
 	if ackStatus == pulsewatchv1.AckStatus_ACK_STATUS_COMMITTED {
 		telemetry.Metrics.IncBatchesCommitted()
+		if s.alertEngine != nil {
+			for _, pt := range req.Points {
+				var ts time.Time
+				if pt.TimestampUnixMs > 0 {
+					ts = time.UnixMilli(pt.TimestampUnixMs)
+				} else {
+					ts = time.Now()
+				}
+				s.alertEngine.EvaluateMetric(req.HostId, pt.Name, pt.Value, ts)
+			}
+		}
 	} else if ackStatus == pulsewatchv1.AckStatus_ACK_STATUS_DUPLICATE {
 		telemetry.Metrics.IncBatchesDuplicate()
 	}

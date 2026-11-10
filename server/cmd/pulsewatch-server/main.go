@@ -16,6 +16,7 @@ import (
 	"time"
 
 	pulsewatchv1 "pulsewatch/proto/v1"
+	"pulsewatch/server/internal/alert"
 	"pulsewatch/server/internal/api"
 	"pulsewatch/server/internal/buffer"
 	"pulsewatch/server/internal/ingest"
@@ -62,13 +63,15 @@ func main() {
 	hostReaper.Start()
 	defer hostReaper.Stop()
 
-	// 4. Start gRPC Ingest Server
+	// 4. Initialize Alert Engine & gRPC Ingest Server
+	alertEngine := alert.NewEngine()
+
 	grpcListener, err := net.Listen("tcp", ":"+grpcPort)
 	if err != nil {
 		log.Fatalf("[PulseWatch Server] Failed to listen on gRPC port %s: %v", grpcPort, err)
 	}
 	grpcServer := grpc.NewServer()
-	ingestService := ingest.NewServer(store, workerQueue)
+	ingestService := ingest.NewServer(store, workerQueue, alertEngine)
 	pulsewatchv1.RegisterMetricsIngestServiceServer(grpcServer, ingestService)
 
 	go func() {
@@ -284,6 +287,82 @@ func main() {
 			case <-ticker.C:
 				sendSSEEvent()
 			}
+		}
+	})
+
+	// ── Alert API endpoints ──────────────────────────────────────────────────
+	// GET /api/v1/rules - List configured rules
+	// POST /api/v1/rules - Create or update rule
+	// DELETE /api/v1/rules?id= - Delete rule
+	mux.HandleFunc("/api/v1/rules", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(alertEngine.ListRules())
+		case http.MethodPost:
+			var req struct {
+				ID          string  `json:"id"`
+				Name        string  `json:"name"`
+				HostID      string  `json:"host_id"`
+				MetricName  string  `json:"metric_name"`
+				Condition   string  `json:"condition"`
+				Threshold   float64 `json:"threshold"`
+				Detector    string  `json:"detector"`
+				DurationSec int     `json:"duration_sec"`
+				Severity    string  `json:"severity"`
+				WebhookURL  string  `json:"webhook_url"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, `{"error": "invalid JSON request"}`, http.StatusBadRequest)
+				return
+			}
+			rule := alert.Rule{
+				ID:         req.ID,
+				Name:       req.Name,
+				HostID:     req.HostID,
+				MetricName: req.MetricName,
+				Condition:  req.Condition,
+				Threshold:  req.Threshold,
+				Detector:   req.Detector,
+				Duration:   time.Duration(req.DurationSec) * time.Second,
+				Severity:   req.Severity,
+				WebhookURL: req.WebhookURL,
+			}
+			if err := alertEngine.AddRule(rule); err != nil {
+				http.Error(w, fmt.Sprintf(`{"error": %q}`, err.Error()), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "rule": rule})
+		case http.MethodDelete:
+			id := r.URL.Query().Get("id")
+			if id == "" {
+				http.Error(w, `{"error": "id parameter required"}`, http.StatusBadRequest)
+				return
+			}
+			deleted := alertEngine.DeleteRule(id)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "deleted": deleted})
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	// GET /api/v1/alerts - List active and historical alerts
+	mux.HandleFunc("/api/v1/alerts", func(w http.ResponseWriter, r *http.Request) {
+		filter := r.URL.Query().Get("state")
+		w.Header().Set("Content-Type", "application/json")
+		switch filter {
+		case "active", "firing", "pending":
+			_ = json.NewEncoder(w).Encode(alertEngine.ListActiveAlerts())
+		case "history", "resolved":
+			_ = json.NewEncoder(w).Encode(alertEngine.ListAlertHistory())
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"active":        alertEngine.ListActiveAlerts(),
+				"history":       alertEngine.ListAlertHistory(),
+				"notifications": alertEngine.ListNotifications(),
+			})
 		}
 	})
 

@@ -43,6 +43,53 @@ export interface LatestMetric {
   labels: Record<string, string>
 }
 
+export interface Rule {
+  id: string
+  name: string
+  host_id?: string
+  metric_name: string
+  condition: string
+  threshold: number
+  detector?: string
+  duration: number
+  severity: 'critical' | 'warning' | 'info'
+  webhook_url?: string
+  created_at: string
+}
+
+export interface AlertInstance {
+  id: string
+  rule_id: string
+  rule_name: string
+  host_id: string
+  metric_name: string
+  state: 'normal' | 'pending' | 'firing' | 'resolved'
+  current_value: number
+  threshold: number
+  severity: string
+  message: string
+  first_trigger: string
+  fired_at?: string
+  resolved_at?: string
+  last_updated: string
+}
+
+export interface Notification {
+  alert_id: string
+  rule_name: string
+  host_id: string
+  state: string
+  severity: string
+  message: string
+  timestamp: string
+}
+
+export interface AlertsResponse {
+  active: AlertInstance[]
+  history: AlertInstance[]
+  notifications: Notification[]
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 async function get<T>(path: string): Promise<T> {
@@ -50,6 +97,28 @@ async function get<T>(path: string): Promise<T> {
   if (!res.ok) {
     const body = await res.text()
     throw new Error(`API ${path} → ${res.status}: ${body}`)
+  }
+  return res.json() as Promise<T>
+}
+
+async function post<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(BASE + path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`API ${path} → ${res.status}: ${text}`)
+  }
+  return res.json() as Promise<T>
+}
+
+async function del<T>(path: string): Promise<T> {
+  const res = await fetch(BASE + path, { method: 'DELETE' })
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`API ${path} → ${res.status}: ${text}`)
   }
   return res.json() as Promise<T>
 }
@@ -90,4 +159,24 @@ export async function fetchRange(
     ...(agg ? { agg } : {}),
   })
   return get(`/api/v1/metrics/range?${params}`)
+}
+
+/** Fetch all alert rules. */
+export async function fetchRules(): Promise<Rule[]> {
+  return get('/api/v1/rules')
+}
+
+/** Create or update an alert rule. */
+export async function createRule(rule: Partial<Rule> & { duration_sec?: number }): Promise<{ status: string; rule: Rule }> {
+  return post('/api/v1/rules', rule)
+}
+
+/** Delete an alert rule by ID. */
+export async function deleteRule(id: string): Promise<{ status: string; deleted: boolean }> {
+  return del(`/api/v1/rules?id=${encodeURIComponent(id)}`)
+}
+
+/** Fetch active alerts, history, and notifications. */
+export async function fetchAlerts(): Promise<AlertsResponse> {
+  return get('/api/v1/alerts')
 }
