@@ -180,7 +180,6 @@ func GenerateSyntheticSuite(seed int64) []GroundTruthPoint {
 			AnomalyID: anomalyCounter,
 		})
 	}
-	anomalyCounter++
 
 	// Final baseline: 50 points
 	for i := 0; i < 50; i++ {

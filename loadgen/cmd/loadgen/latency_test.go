@@ -10,8 +10,8 @@ func TestLatencyTracker(t *testing.T) {
 
 	// Test empty tracker
 	p50, p90, p95, p99, min, max := tracker.Percentiles()
-	if p50 != 0 || min != 0 || max != 0 {
-		t.Fatalf("expected 0 for empty tracker, got %v", p50)
+	if p50 != 0 || p90 != 0 || p95 != 0 || p99 != 0 || min != 0 || max != 0 {
+		t.Fatalf("expected 0 for empty tracker, got %v, %v, %v, %v, %v, %v", p50, p90, p95, p99, min, max)
 	}
 
 	// Record 100 values from 1ms to 100ms
