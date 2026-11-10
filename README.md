@@ -135,7 +135,7 @@ curl http://localhost:8080/metrics
 - [x] Phase 4 — Widen (all collectors, heartbeats, rollups, /metrics)
 - [x] Phase 5 — Query API & Live Dashboard
 - [x] Phase 6 — Alerting & Streaming Detection
-- [ ] Phase 7 — Load Generator & Evaluation
+- [x] Phase 7 — Load Generator & Evaluation
 - [ ] Phase 8 — Python ML Sidecar
 
 ## Chaos Test Results

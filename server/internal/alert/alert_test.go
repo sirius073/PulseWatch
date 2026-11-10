@@ -42,7 +42,7 @@ func TestAlertStateMachineHysteresis(t *testing.T) {
 	testRule := alert.Rule{
 		ID:         "cpu-test",
 		Name:       "CPU High Test",
-		MetricName: "system.cpu.total",
+		MetricName: "test.metric.hysteresis",
 		Condition:  ">",
 		Threshold:  80.0,
 		Duration:   30 * time.Second,
@@ -63,14 +63,14 @@ func TestAlertStateMachineHysteresis(t *testing.T) {
 	baseTime := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
 
 	// Step 1: Normal reading (< 80)
-	engine.EvaluateMetric("host-1", "system.cpu.total", 50.0, baseTime)
+	engine.EvaluateMetric("host-1", "test.metric.hysteresis", 50.0, baseTime)
 	active := engine.ListActiveAlerts()
 	if len(active) != 0 {
 		t.Fatalf("expected 0 active alerts, got %d", len(active))
 	}
 
 	// Step 2: First breach at t=0s -> should enter StatePending (NOT firing yet)
-	engine.EvaluateMetric("host-1", "system.cpu.total", 85.0, baseTime)
+	engine.EvaluateMetric("host-1", "test.metric.hysteresis", 85.0, baseTime)
 	active = engine.ListActiveAlerts()
 	if len(active) != 1 {
 		t.Fatalf("expected 1 active alert, got %d", len(active))
@@ -84,7 +84,7 @@ func TestAlertStateMachineHysteresis(t *testing.T) {
 
 	// Step 3: Continued breach at t=15s (< 30s duration) -> still StatePending
 	t15 := baseTime.Add(15 * time.Second)
-	engine.EvaluateMetric("host-1", "system.cpu.total", 88.0, t15)
+	engine.EvaluateMetric("host-1", "test.metric.hysteresis", 88.0, t15)
 	active = engine.ListActiveAlerts()
 	if active[0].State != alert.StatePending {
 		t.Fatalf("expected still StatePending at t=15s, got %s", active[0].State)
@@ -92,7 +92,7 @@ func TestAlertStateMachineHysteresis(t *testing.T) {
 
 	// Step 4: Continued breach at t=35s (>= 30s duration) -> transitions to StateFiring!
 	t35 := baseTime.Add(35 * time.Second)
-	engine.EvaluateMetric("host-1", "system.cpu.total", 92.0, t35)
+	engine.EvaluateMetric("host-1", "test.metric.hysteresis", 92.0, t35)
 	active = engine.ListActiveAlerts()
 	if active[0].State != alert.StateFiring {
 		t.Fatalf("expected StateFiring at t=35s, got %s", active[0].State)
@@ -108,7 +108,7 @@ func TestAlertStateMachineHysteresis(t *testing.T) {
 
 	// Step 5: Metric recovers at t=50s (value=60.0) -> transitions to StateResolved!
 	t50 := baseTime.Add(50 * time.Second)
-	engine.EvaluateMetric("host-1", "system.cpu.total", 60.0, t50)
+	engine.EvaluateMetric("host-1", "test.metric.hysteresis", 60.0, t50)
 	active = engine.ListActiveAlerts()
 	if len(active) != 0 {
 		t.Fatalf("expected 0 active alerts after resolution, got %d", len(active))
@@ -137,7 +137,7 @@ func TestAlertFlapProtection(t *testing.T) {
 	testRule := alert.Rule{
 		ID:         "mem-flap",
 		Name:       "Memory Flap Test",
-		MetricName: "system.memory.used_percent",
+		MetricName: "test.metric.flap",
 		Condition:  ">",
 		Threshold:  85.0,
 		Duration:   20 * time.Second,
@@ -152,14 +152,14 @@ func TestAlertFlapProtection(t *testing.T) {
 
 	t0 := time.Now()
 	// Breach at t=0
-	engine.EvaluateMetric("host-flap", "system.memory.used_percent", 90.0, t0)
+	engine.EvaluateMetric("host-flap", "test.metric.flap", 90.0, t0)
 	active := engine.ListActiveAlerts()
 	if len(active) != 1 || active[0].State != alert.StatePending {
 		t.Fatalf("expected 1 pending alert, got %v", active)
 	}
 
 	// Recovers at t=5s (before 20s duration) -> flap protection cleans up without firing
-	engine.EvaluateMetric("host-flap", "system.memory.used_percent", 70.0, t0.Add(5*time.Second))
+	engine.EvaluateMetric("host-flap", "test.metric.flap", 70.0, t0.Add(5*time.Second))
 	active = engine.ListActiveAlerts()
 	if len(active) != 0 {
 		t.Fatalf("expected 0 active alerts after flap recovery, got %d", len(active))
