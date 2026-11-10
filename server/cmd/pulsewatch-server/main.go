@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -286,9 +287,37 @@ func main() {
 		}
 	})
 
+	// ── Static SPA frontend serving ──────────────────────────────────────────
+	if _, err := os.Stat("frontend/dist"); err == nil {
+		fileServer := http.FileServer(http.Dir("frontend/dist"))
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			cleanPath := filepath.Clean(r.URL.Path)
+			diskPath := filepath.Join("frontend/dist", cleanPath)
+			if fi, err := os.Stat(diskPath); os.IsNotExist(err) || fi.IsDir() {
+				// Fallback to index.html for client-side routing
+				http.ServeFile(w, r, "frontend/dist/index.html")
+				return
+			}
+			fileServer.ServeHTTP(w, r)
+		})
+		log.Println("[PulseWatch Server] Serving frontend UI from frontend/dist")
+	}
+
+	// Wrap in CORS handler
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+
 	httpServer := &http.Server{
 		Addr:        ":" + httpPort,
-		Handler:     mux,
+		Handler:     handler,
 		ReadTimeout: 5 * time.Second,
 		// WriteTimeout must be 0 (no timeout) because SSE connections are
 		// long-lived. A non-zero value would kill the stream after the timeout.
