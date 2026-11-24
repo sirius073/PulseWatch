@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"os"
 	"os/signal"
@@ -18,9 +19,19 @@ import (
 const agentVersion = "v1.0.0"
 
 func main() {
+	// CLI flags — allow users to specify server address directly on the command line.
+	// Priority: -server flag > PULSEWATCH_SERVER_ADDR env var > default localhost:50051
+	serverFlag := flag.String("server", "", "PulseWatch server address.\n  gRPC:  host:50051  (default)\n  HTTPS: https://your-pulsewatch.onrender.com")
+	hostIDFlag := flag.String("host-id", "", "Override host identifier (defaults to hostname)")
+	walDirFlag := flag.String("wal-dir", "", "Directory for local WAL storage (default: wal_data)")
+	flag.Parse()
+
 	log.Println("[PulseWatch Agent] Starting with full collector suite & heartbeat...")
 
-	serverAddr := os.Getenv("PULSEWATCH_SERVER_ADDR")
+	serverAddr := *serverFlag
+	if serverAddr == "" {
+		serverAddr = os.Getenv("PULSEWATCH_SERVER_ADDR")
+	}
 	if serverAddr == "" {
 		serverAddr = "localhost:50051"
 	}
@@ -30,12 +41,18 @@ func main() {
 		hostname = "pulsewatch-agent"
 	}
 
-	hostID := os.Getenv("PULSEWATCH_HOST_ID")
+	hostID := *hostIDFlag
+	if hostID == "" {
+		hostID = os.Getenv("PULSEWATCH_HOST_ID")
+	}
 	if hostID == "" {
 		hostID = hostname
 	}
 
-	walDir := os.Getenv("PULSEWATCH_WAL_DIR")
+	walDir := *walDirFlag
+	if walDir == "" {
+		walDir = os.Getenv("PULSEWATCH_WAL_DIR")
+	}
 	if walDir == "" {
 		walDir = "wal_data"
 	}

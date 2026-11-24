@@ -1,0 +1,55 @@
+name: Release Agent Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'   # triggers on: git tag v1.0.0 && git push origin v1.0.0
+
+permissions:
+  contents: write   # needed to create a GitHub Release and upload assets
+
+jobs:
+  build-and-release:
+    name: Build & Release
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            asset_name: agent-linux-amd64
+          - goos: linux
+            goarch: arm64
+            asset_name: agent-linux-arm64
+          - goos: windows
+            goarch: amd64
+            asset_name: agent-windows-amd64.exe
+          - goos: darwin
+            goarch: arm64
+            asset_name: agent-darwin-arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Build agent binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          go build \
+            -ldflags="-s -w -X main.agentVersion=${{ github.ref_name }}" \
+            -o ${{ matrix.asset_name }} \
+            ./agent/cmd/agent/
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset_name }}
+          generate_release_notes: true

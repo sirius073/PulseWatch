@@ -41,7 +41,11 @@ func main() {
 	if grpcPort == "" {
 		grpcPort = "50051"
 	}
-	httpPort := os.Getenv("PULSEWATCH_HTTP_PORT")
+	// Accept PORT (Render/Fly/Koyeb standard) or PULSEWATCH_HTTP_PORT; default 8080.
+	httpPort := os.Getenv("PORT")
+	if httpPort == "" {
+		httpPort = os.Getenv("PULSEWATCH_HTTP_PORT")
+	}
 	if httpPort == "" {
 		httpPort = "8080"
 	}
@@ -87,14 +91,16 @@ func main() {
 	// 5. Start HTTP Query, Health & Telemetry Server
 	mux := http.NewServeMux()
 
-	// Health check
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	// Health check — both /health (local) and /api/v1/health (Render health check path)
+	healthHandler := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":      "ok",
 			"queue_depth": workerQueue.Depth(),
 		})
-	})
+	}
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/api/v1/health", healthHandler)
 
 	// Prometheus Self-Monitoring metrics
 	activeHostsCounter := func() int {
@@ -140,6 +146,140 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(record)
+	})
+
+	// ── HTTP Ingestion Endpoints (Enables Port 80/443 HTTPS Agents) ────────────
+	// POST /api/v1/ingest/batch
+	// Accepts metrics over standard HTTP/HTTPS so agents can stream through
+	// any corporate firewall or cloud proxy without requiring open port 50051.
+	mux.HandleFunc("/api/v1/ingest/batch", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			HostID        string `json:"host_id"`
+			Seq           uint64 `json:"seq"`
+			SentAtUnixMs  int64  `json:"sent_at_unix_ms"`
+			Points        []struct {
+				Name            string            `json:"name"`
+				Value           float64           `json:"value"`
+				TimestampUnixMs int64             `json:"timestamp_unix_ms"`
+				Labels          map[string]string `json:"labels"`
+			} `json:"points"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error": "invalid JSON batch payload"}`, http.StatusBadRequest)
+			return
+		}
+		if req.HostID == "" || req.Seq == 0 {
+			http.Error(w, `{"error": "host_id and non-zero seq are required"}`, http.StatusBadRequest)
+			return
+		}
+
+		// Convert to proto MetricBatch to reuse bounded queue with deferred DB commit
+		pbBatch := &pulsewatchv1.MetricBatch{
+			HostId:       req.HostID,
+			Seq:          req.Seq,
+			SentAtUnixMs: req.SentAtUnixMs,
+			Points:       make([]*pulsewatchv1.MetricPoint, 0, len(req.Points)),
+		}
+
+		for _, p := range req.Points {
+			pbBatch.Points = append(pbBatch.Points, &pulsewatchv1.MetricPoint{
+				Name:            p.Name,
+				Value:           p.Value,
+				TimestampUnixMs: p.TimestampUnixMs,
+				Labels:          p.Labels,
+			})
+		}
+
+		telemetry.Metrics.IncBatchesReceived()
+		telemetry.Metrics.AddPointsReceived(len(pbBatch.Points))
+
+		ackStatus, err := workerQueue.EnqueueAndWait(r.Context(), pbBatch)
+		if err != nil {
+			telemetry.Metrics.IncCommitErrors()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"host_id": req.HostID,
+				"seq":     req.Seq,
+				"status":  "RETRYABLE_ERROR",
+				"error":   err.Error(),
+			})
+			return
+		}
+
+		statusStr := "COMMITTED"
+		if ackStatus == pulsewatchv1.AckStatus_ACK_STATUS_COMMITTED {
+			telemetry.Metrics.IncBatchesCommitted()
+			for _, pt := range pbBatch.Points {
+				var ts time.Time
+				if pt.TimestampUnixMs > 0 {
+					ts = time.UnixMilli(pt.TimestampUnixMs)
+				} else {
+					ts = time.Now()
+				}
+				alertEngine.EvaluateMetric(req.HostID, pt.Name, pt.Value, ts)
+			}
+		} else if ackStatus == pulsewatchv1.AckStatus_ACK_STATUS_DUPLICATE {
+			telemetry.Metrics.IncBatchesDuplicate()
+			statusStr = "DUPLICATE"
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"host_id": req.HostID,
+			"seq":     req.Seq,
+			"status":  statusStr,
+		})
+	})
+
+	// POST /api/v1/ingest/heartbeat
+	mux.HandleFunc("/api/v1/ingest/heartbeat", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			HostID       string `json:"host_id"`
+			Hostname     string `json:"hostname"`
+			OS           string `json:"os"`
+			Arch         string `json:"arch"`
+			AgentVersion string `json:"agent_version"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error": "invalid JSON heartbeat payload"}`, http.StatusBadRequest)
+			return
+		}
+		if req.HostID == "" {
+			http.Error(w, `{"error": "host_id is required"}`, http.StatusBadRequest)
+			return
+		}
+
+		hb := &pulsewatchv1.HeartbeatRequest{
+			HostId:       req.HostID,
+			Hostname:     req.Hostname,
+			Os:           req.OS,
+			Arch:         req.Arch,
+			AgentVersion: req.AgentVersion,
+		}
+
+		if err := store.RecordHeartbeat(r.Context(), hb); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error": %q}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"acknowledged":         true,
+			"server_time_unix_ms": time.Now().UnixMilli(),
+		})
 	})
 
 	// ── Range query endpoint ───────────────────────────────────────────────────
