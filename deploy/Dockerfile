@@ -1,5 +1,5 @@
 # ── Stage 1: Build Go binaries ────────────────────────────────────────────────
-FROM golang:1.24-bookworm AS go-builder
+FROM golang:1.26-bookworm AS go-builder
 
 WORKDIR /build
 COPY go.mod go.sum ./
