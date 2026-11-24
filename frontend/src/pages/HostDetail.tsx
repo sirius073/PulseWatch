@@ -117,15 +117,27 @@ export function HostDetail() {
   const navigate = useNavigate()
   const [host, setHost] = useState<Host | null>(null)
   const [notFound, setNotFound] = useState(false)
+  const [runway, setRunway] = useState<any>(null)
+
+  const decodedId = hostId ? decodeURIComponent(hostId) : ''
 
   useEffect(() => {
-    if (!hostId) return
+    if (!decodedId) return
     fetchHosts().then(data => {
-      const found = (data.value ?? []).find(h => h.host_id === decodeURIComponent(hostId))
+      const list = Array.isArray(data) ? data : (data.value ?? [])
+      const found = list.find((h: Host) => h.host_id === decodedId)
       if (found) setHost(found)
       else setNotFound(true)
     }).catch(() => setNotFound(true))
-  }, [hostId])
+  }, [decodedId])
+
+  useEffect(() => {
+    if (!decodedId) return
+    fetch(`/api/v1/predict/runway?host=${encodeURIComponent(decodedId)}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d && d.forecast) setRunway(d.forecast) })
+      .catch(() => {})
+  }, [decodedId])
 
   if (notFound) {
     return (
@@ -139,16 +151,6 @@ export function HostDetail() {
   if (!host) {
     return <div className="loading">Loading host…</div>
   }
-
-  const decodedId = decodeURIComponent(hostId!)
-  const [runway, setRunway] = useState<any>(null)
-
-  useEffect(() => {
-    fetch(`/api/v1/predict/runway?host=${encodeURIComponent(decodedId)}`)
-      .then(r => r.ok ? r.json() : null)
-      .then(d => { if (d && d.forecast) setRunway(d.forecast) })
-      .catch(() => {})
-  }, [decodedId])
 
   return (
     <div className="page">

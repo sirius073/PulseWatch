@@ -24,7 +24,7 @@ export function Hosts() {
   const load = useCallback(async () => {
     try {
       const data = await fetchHosts()
-      setHosts(data.value ?? [])
+      setHosts(Array.isArray(data) ? data : (data.value ?? []))
       setError(null)
     } catch (e) {
       setError(String(e))
