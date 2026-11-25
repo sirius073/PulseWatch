@@ -6,7 +6,11 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -17,6 +21,35 @@ import (
 )
 
 const agentVersion = "v1.0.0"
+
+func loadInitialSeq(diskWAL *wal.WAL, statePath string) (uint64, error) {
+	var maxSeq uint64
+
+	walSeq, err := diskWAL.MaxSequence()
+	if err != nil {
+		return 0, err
+	}
+	if walSeq > maxSeq {
+		maxSeq = walSeq
+	}
+
+	if raw, err := os.ReadFile(statePath); err == nil {
+		if v, parseErr := strconv.ParseUint(strings.TrimSpace(string(raw)), 10, 64); parseErr == nil && v > maxSeq {
+			maxSeq = v
+		}
+	}
+
+	return maxSeq, nil
+}
+
+func saveSeqState(statePath string, seq uint64) {
+	if seq == 0 {
+		return
+	}
+	if err := os.WriteFile(statePath, []byte(strconv.FormatUint(seq, 10)+"\n"), 0644); err != nil {
+		log.Printf("[Agent WAL] Failed to persist sequence state %d: %v", seq, err)
+	}
+}
 
 func main() {
 	// CLI flags — allow users to specify server address directly on the command line.
@@ -78,7 +111,18 @@ func main() {
 	}
 	defer snd.Close()
 
+	seqStatePath := filepath.Join(walDir, "last_seq.txt")
+	initSeq, err := loadInitialSeq(diskWAL, seqStatePath)
+	if err != nil {
+		log.Fatalf("[PulseWatch Agent] Failed to recover initial sequence: %v", err)
+	}
+	if initSeq > 0 {
+		snd.SetSeq(initSeq)
+		log.Printf("[Agent WAL] Restored sequence baseline to %d", initSeq)
+	}
+
 	backoff := sender.NewBackoff(500*time.Millisecond, 15*time.Second)
+	var replaying atomic.Bool
 
 	// 3. Initialize Full Suite of Collectors
 	collectors := []collector.Collector{
@@ -122,12 +166,19 @@ func main() {
 			}
 
 		case <-collectTicker.C:
-			// Step A: Attempt to drain and replay WAL if there is buffered data
-			if diskWAL.HasBufferedData() {
-				replayBatches, err := diskWAL.ReplayAll()
-				if err == nil && len(replayBatches) > 0 {
+			// Step A: Replay WAL off the collect tick so large spools don't stall collection.
+			if diskWAL.HasBufferedData() && replaying.CompareAndSwap(false, true) {
+				go func() {
+					defer replaying.Store(false)
+
+					replayBatches, err := diskWAL.ReplayAll()
+					if err != nil || len(replayBatches) == 0 {
+						return
+					}
+
 					log.Printf("[Agent WAL] Found %d buffered batches to replay...", len(replayBatches))
 					allReplayed := true
+					var highestReplayedSeq uint64
 					for _, b := range replayBatches {
 						replayCtx, replayCancel := context.WithTimeout(context.Background(), 3*time.Second)
 						ack, err := snd.SendPreparedBatch(replayCtx, b)
@@ -138,14 +189,20 @@ func main() {
 							allReplayed = false
 							break
 						}
+						if b.Seq > highestReplayedSeq {
+							highestReplayedSeq = b.Seq
+						}
 					}
 
 					if allReplayed {
 						log.Printf("[Agent WAL] Successfully replayed all %d batches! Purging disk WAL.", len(replayBatches))
+						if highestReplayedSeq > 0 {
+							saveSeqState(seqStatePath, highestReplayedSeq)
+						}
 						_ = diskWAL.PurgeAll()
 						backoff.Reset()
 					}
-				}
+				}()
 			}
 
 			// Step B: Collect metrics from all active collectors
@@ -164,7 +221,7 @@ func main() {
 
 			// Step C: Send or Spool to WAL
 			if diskWAL.HasBufferedData() {
-				// Server currently offline; spool directly to disk to preserve sequence
+				// Server currently offline or WAL replay in progress; spool to preserve sequence
 				batch := &pulsewatchv1.MetricBatch{
 					HostId:       hostID,
 					Seq:          snd.NextSeq(),
@@ -174,6 +231,7 @@ func main() {
 				if err := diskWAL.Append(batch); err != nil {
 					log.Printf("[Agent WAL] Critical error spooling to WAL: %v", err)
 				} else {
+					saveSeqState(seqStatePath, batch.Seq)
 					log.Printf("[Agent WAL] Spooled batch seq=%d (%d points) to disk", batch.Seq, len(allPoints))
 				}
 			} else {
@@ -184,6 +242,7 @@ func main() {
 
 				if err != nil || (ack != nil && ack.Status == pulsewatchv1.AckStatus_ACK_STATUS_RETRYABLE_ERROR) {
 					if batch != nil {
+						saveSeqState(seqStatePath, batch.Seq)
 						if walErr := diskWAL.Append(batch); walErr != nil {
 							log.Printf("[Agent WAL] Error spooling to WAL: %v", walErr)
 						} else {
@@ -191,6 +250,9 @@ func main() {
 						}
 					}
 				} else {
+					if batch != nil {
+						saveSeqState(seqStatePath, batch.Seq)
+					}
 					backoff.Reset()
 				}
 			}

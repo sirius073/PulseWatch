@@ -141,6 +141,42 @@ func TestWALSegmentRolling(t *testing.T) {
 	}
 }
 
+func TestWALMaxSequence(t *testing.T) {
+	tempDir := t.TempDir()
+
+	w, err := wal.Open(wal.Config{
+		Dir:               tempDir,
+		MaxSegmentBytes:   250,
+		MaxTotalDiskBytes: 10 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("failed to open wal: %v", err)
+	}
+	defer w.Close()
+
+	seq0, err := w.MaxSequence()
+	if err != nil {
+		t.Fatalf("MaxSequence on empty wal failed: %v", err)
+	}
+	if seq0 != 0 {
+		t.Fatalf("expected max seq 0 on empty wal, got %d", seq0)
+	}
+
+	for _, seq := range []uint64{4, 12, 7, 19} {
+		if err := w.Append(createTestBatch("host-seq", seq, 1.0)); err != nil {
+			t.Fatalf("failed appending seq %d: %v", seq, err)
+		}
+	}
+
+	maxSeq, err := w.MaxSequence()
+	if err != nil {
+		t.Fatalf("MaxSequence failed: %v", err)
+	}
+	if maxSeq != 19 {
+		t.Fatalf("expected max seq 19, got %d", maxSeq)
+	}
+}
+
 func TestWALCorruptionDetection(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "pulsewatch_wal_corrupt_test_*")
 	if err != nil {

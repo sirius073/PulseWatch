@@ -11,6 +11,51 @@ import (
 
 const testConnString = "postgres://pulsewatch:pulsewatch_secret@localhost:5432/pulsewatch?sslmode=disable"
 
+func TestStorageTimestampValidation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	s, err := storage.New(ctx, testConnString)
+	if err != nil {
+		t.Skipf("skipping DB-backed validation checks (DB not reachable): %v", err)
+	}
+	defer s.Close()
+
+	now := time.Now()
+	cases := []struct {
+		name    string
+		tsMs    int64
+		wantErr bool
+	}{
+		{"zero timestamp rejected", 0, true},
+		{"older than 24h rejected", now.Add(-25 * time.Hour).UnixMilli(), true},
+		{"further than 5m in future rejected", now.Add(10 * time.Minute).UnixMilli(), true},
+		{"current timestamp accepted", now.UnixMilli(), false},
+	}
+
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			batch := &pulsewatchv1.MetricBatch{
+				HostId:       "test-host-ts",
+				Seq:          uint64(100 + i),
+				SentAtUnixMs: now.UnixMilli(),
+				Points: []*pulsewatchv1.MetricPoint{{
+					Name:            "system.cpu.total",
+					Value:           12.5,
+					TimestampUnixMs: tc.tsMs,
+				}},
+			}
+			_, err := s.IngestBatch(ctx, batch)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error for %s, got nil", tc.name)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error for %s: %v", tc.name, err)
+			}
+		})
+	}
+}
+
 func TestStorageIngestAndQuery(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

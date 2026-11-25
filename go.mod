@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/shirou/gopsutil/v4 v4.26.9
+	golang.org/x/time v0.16.0
 	google.golang.org/grpc v1.71.0
 	google.golang.org/protobuf v1.36.12
 )

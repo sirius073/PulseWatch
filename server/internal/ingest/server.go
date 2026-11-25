@@ -22,6 +22,7 @@ type Server struct {
 	store       *storage.Storage
 	queue       *buffer.Queue
 	alertEngine *alert.Engine
+	limiter     *hostLimiter
 }
 
 // NewServer constructs an ingestion server backed by the storage engine, worker queue, and alert engine.
@@ -30,6 +31,7 @@ func NewServer(store *storage.Storage, queue *buffer.Queue, alertEngine *alert.E
 		store:       store,
 		queue:       queue,
 		alertEngine: alertEngine,
+		limiter:     newHostLimiter(20, 40),
 	}
 }
 
@@ -42,6 +44,9 @@ func (s *Server) IngestBatch(ctx context.Context, req *pulsewatchv1.MetricBatch)
 	}
 	if req.Seq == 0 {
 		return nil, status.Error(codes.InvalidArgument, "seq must be greater than 0")
+	}
+	if !s.limiter.allow(req.HostId) {
+		return nil, status.Error(codes.ResourceExhausted, "rate limit exceeded for host")
 	}
 
 	telemetry.Metrics.IncBatchesReceived()
@@ -96,6 +101,9 @@ func (s *Server) IngestBatch(ctx context.Context, req *pulsewatchv1.MetricBatch)
 func (s *Server) SendHeartbeat(ctx context.Context, req *pulsewatchv1.HeartbeatRequest) (*pulsewatchv1.HeartbeatResponse, error) {
 	if req.HostId == "" {
 		return nil, status.Error(codes.InvalidArgument, "host_id is required")
+	}
+	if !s.limiter.allow(req.HostId) {
+		return nil, status.Error(codes.ResourceExhausted, "rate limit exceeded for host")
 	}
 
 	if err := s.store.RecordHeartbeat(ctx, req); err != nil {

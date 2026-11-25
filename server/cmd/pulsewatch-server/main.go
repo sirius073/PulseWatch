@@ -28,6 +28,7 @@ import (
 	"pulsewatch/server/internal/telemetry"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 func main() {
@@ -77,7 +78,24 @@ func main() {
 	if err != nil {
 		log.Fatalf("[PulseWatch Server] Failed to listen on gRPC port %s: %v", grpcPort, err)
 	}
-	grpcServer := grpc.NewServer()
+
+	var grpcOpts []grpc.ServerOption
+	if certFile, keyFile := os.Getenv("PULSEWATCH_TLS_CERT"), os.Getenv("PULSEWATCH_TLS_KEY"); certFile != "" && keyFile != "" {
+		tlsCreds, err := credentials.NewServerTLSFromFile(certFile, keyFile)
+		if err != nil {
+			log.Fatalf("[PulseWatch Server] Failed to load gRPC TLS credentials: %v", err)
+		}
+		grpcOpts = append(grpcOpts, grpc.Creds(tlsCreds))
+		log.Println("[PulseWatch Server] gRPC TLS enabled")
+	}
+	if apiKey := os.Getenv("PULSEWATCH_API_KEY"); apiKey != "" {
+		grpcOpts = append(grpcOpts, grpc.UnaryInterceptor(ingest.APIKeyUnaryInterceptor(map[string]struct{}{
+			apiKey: {},
+		})))
+		log.Println("[PulseWatch Server] gRPC API key authentication enabled")
+	}
+
+	grpcServer := grpc.NewServer(grpcOpts...)
 	ingestService := ingest.NewServer(store, workerQueue, alertEngine)
 	pulsewatchv1.RegisterMetricsIngestServiceServer(grpcServer, ingestService)
 
@@ -159,10 +177,10 @@ func main() {
 		}
 
 		var req struct {
-			HostID        string `json:"host_id"`
-			Seq           uint64 `json:"seq"`
-			SentAtUnixMs  int64  `json:"sent_at_unix_ms"`
-			Points        []struct {
+			HostID       string `json:"host_id"`
+			Seq          uint64 `json:"seq"`
+			SentAtUnixMs int64  `json:"sent_at_unix_ms"`
+			Points       []struct {
 				Name            string            `json:"name"`
 				Value           float64           `json:"value"`
 				TimestampUnixMs int64             `json:"timestamp_unix_ms"`
@@ -277,7 +295,7 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"acknowledged":         true,
+			"acknowledged":        true,
 			"server_time_unix_ms": time.Now().UnixMilli(),
 		})
 	})
@@ -344,13 +362,13 @@ func main() {
 		}
 
 		result := struct {
-			HostID     string             `json:"host_id"`
-			MetricName string             `json:"metric_name"`
-			From       time.Time          `json:"from"`
-			To         time.Time          `json:"to"`
-			Step       string             `json:"step"`
-			Agg        string             `json:"agg"`
-			Table      string             `json:"table"`
+			HostID     string              `json:"host_id"`
+			MetricName string              `json:"metric_name"`
+			From       time.Time           `json:"from"`
+			To         time.Time           `json:"to"`
+			Step       string              `json:"step"`
+			Agg        string              `json:"agg"`
+			Table      string              `json:"table"`
 			Points     []storage.DataPoint `json:"points"`
 		}{
 			HostID:     p.HostID,

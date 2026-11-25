@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	pulsewatchv1 "pulsewatch/proto/v1"
@@ -33,6 +34,11 @@ const (
 	MaxPointsPerBatch = 2000
 	// MaxLabelsPerPoint protects against high-cardinality explosions.
 	MaxLabelsPerPoint = 32
+	// MaxDistinctLabelSets caps total distinct label sets interned in memory/DB.
+	MaxDistinctLabelSets = 10000
+	// Timestamp bounds to reject bogus/out-of-range timestamps before chunk creation.
+	maxHistoricalAge   = 24 * time.Hour
+	maxClockSkewFuture = 5 * time.Minute
 )
 
 // MetricRecord represents a query result of a single metric reading.
@@ -46,9 +52,10 @@ type MetricRecord struct {
 
 // Storage manages database operations, interned caching, and idempotency guarantees.
 type Storage struct {
-	pool        *pgxpool.Pool
-	metricCache sync.Map // map[string]int32
-	labelCache  sync.Map // map[int64]int64
+	pool          *pgxpool.Pool
+	metricCache   sync.Map // map[string]int32
+	labelCache    sync.Map // map[int64]int64
+	labelSetCount atomic.Int64
 }
 
 // New creates a new Storage instance connected to TimescaleDB.
@@ -106,7 +113,27 @@ func (s *Storage) preloadCaches(ctx context.Context) error {
 		}
 		s.metricCache.Store(name, id)
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	labelRows, err := s.pool.Query(ctx, "SELECT id, labels_hash FROM label_sets")
+	if err != nil {
+		return err
+	}
+	defer labelRows.Close()
+
+	var count int64
+	for labelRows.Next() {
+		var id, hash int64
+		if err := labelRows.Scan(&id, &hash); err != nil {
+			return err
+		}
+		s.labelCache.Store(hash, id)
+		count++
+	}
+	s.labelSetCount.Store(count)
+	return labelRows.Err()
 }
 
 // HashLabels computes a deterministic 64-bit FNV hash for sorted key-value pairs.
@@ -152,14 +179,21 @@ func (s *Storage) getOrInsertMetricID(ctx context.Context, tx pgx.Tx, name strin
 	return id, nil
 }
 
-// getOrInsertLabelSetID resolves an interned label set ID.
+// getOrInsertLabelSetID resolves an interned label set ID while enforcing distinct label-set bounds.
 func (s *Storage) getOrInsertLabelSetID(ctx context.Context, tx pgx.Tx, labels map[string]string) (int64, error) {
+	if len(labels) > MaxLabelsPerPoint {
+		return 0, fmt.Errorf("point exceeds maximum allowed labels (%d > %d)", len(labels), MaxLabelsPerPoint)
+	}
 	if labels == nil {
 		labels = make(map[string]string)
 	}
 	hash := HashLabels(labels)
 	if val, ok := s.labelCache.Load(hash); ok {
 		return val.(int64), nil
+	}
+
+	if s.labelSetCount.Load() >= MaxDistinctLabelSets {
+		return 0, fmt.Errorf("distinct label set cardinality cap reached (%d)", MaxDistinctLabelSets)
 	}
 
 	labelsJSON, err := json.Marshal(labels)
@@ -179,8 +213,25 @@ func (s *Storage) getOrInsertLabelSetID(ctx context.Context, tx pgx.Tx, labels m
 		return 0, fmt.Errorf("failed to intern label set: %w", err)
 	}
 
-	s.labelCache.Store(hash, id)
+	if _, loaded := s.labelCache.LoadOrStore(hash, id); !loaded {
+		s.labelSetCount.Add(1)
+	}
 	return id, nil
+}
+
+func validateTimestamp(tsMs int64, now time.Time) error {
+	ts := time.UnixMilli(tsMs)
+	minTS := now.Add(-maxHistoricalAge)
+	maxTS := now.Add(maxClockSkewFuture)
+	if ts.Before(minTS) || ts.After(maxTS) {
+		return fmt.Errorf(
+			"timestamp %s outside allowed window [%s, %s]",
+			ts.UTC().Format(time.RFC3339),
+			minTS.UTC().Format(time.RFC3339),
+			maxTS.UTC().Format(time.RFC3339),
+		)
+	}
+	return nil
 }
 
 // IngestBatch persists a MetricBatch atomically, enforcing sequence-number idempotency.
@@ -190,9 +241,16 @@ func (s *Storage) IngestBatch(ctx context.Context, batch *pulsewatchv1.MetricBat
 		return pulsewatchv1.AckStatus_ACK_STATUS_COMMITTED, nil
 	}
 
-	// Cardinality limit guard
+	// Batch size guard
 	if len(batch.Points) > MaxPointsPerBatch {
 		return pulsewatchv1.AckStatus_ACK_STATUS_REJECTED, fmt.Errorf("batch exceeds maximum allowed points (%d > %d)", len(batch.Points), MaxPointsPerBatch)
+	}
+
+	now := time.Now()
+	for _, pt := range batch.Points {
+		if err := validateTimestamp(pt.TimestampUnixMs, now); err != nil {
+			return pulsewatchv1.AckStatus_ACK_STATUS_REJECTED, err
+		}
 	}
 
 	// 1. Check last acked sequence number for this host
@@ -229,7 +287,7 @@ func (s *Storage) IngestBatch(ctx context.Context, batch *pulsewatchv1.MetricBat
 
 		labelSetID, err := s.getOrInsertLabelSetID(ctx, tx, pt.Labels)
 		if err != nil {
-			return pulsewatchv1.AckStatus_ACK_STATUS_RETRYABLE_ERROR, err
+			return pulsewatchv1.AckStatus_ACK_STATUS_REJECTED, err
 		}
 
 		rows = append(rows, rowData{
@@ -366,36 +424,21 @@ func (s *Storage) ListHosts(ctx context.Context) ([]HostRecord, error) {
 
 // ─── Range Query ──────────────────────────────────────────────────────────────
 
-// QueryRangeParams mirrors api.QueryRangeParams but lives here to avoid
-// an import cycle (storage ← api). The api package converts between them.
 type QueryRangeParams struct {
 	HostID     string
 	MetricName string
 	From       time.Time
 	To         time.Time
-	// Table is "raw" or "rollup_1m", chosen by api.TableFor().
-	Table string
-	// Step bucket: "1m", "5m", "1h" — used for time_bucket() on rollup queries.
-	Step string
-	// Agg: "avg", "min", "max", "sum"
-	Agg string
+	Table      string
+	Step       string
+	Agg        string
 }
 
-// DataPoint is a single timestamped value returned from a range query.
 type DataPoint struct {
 	Ts    time.Time `json:"ts"`
 	Value float64   `json:"value"`
 }
 
-// QueryRange fetches aggregated time-series data for a single metric on one host.
-//
-// For raw windows (≤6 h) it queries the `metrics` hypertable directly and
-// returns every stored row (no bucketing). For wider windows it queries the
-// `metrics_rollup_1m` continuous aggregate and applies time_bucket() with the
-// requested Step so the client always gets a manageable number of points.
-//
-// Rollup averages are computed as SUM(sum_val)/SUM(count_val) to avoid the
-// avg-of-avgs problem.
 func (s *Storage) QueryRange(ctx context.Context, p QueryRangeParams) ([]DataPoint, error) {
 	switch p.Table {
 	case "raw":
@@ -405,11 +448,7 @@ func (s *Storage) QueryRange(ctx context.Context, p QueryRangeParams) ([]DataPoi
 	}
 }
 
-// queryRaw reads directly from the metrics hypertable.
-// It returns every individual point in the window — no bucketing.
 func (s *Storage) queryRaw(ctx context.Context, p QueryRangeParams) ([]DataPoint, error) {
-	// We resolve metric_id and host labels via the interned caches.
-	// For a query we go back to the DB since the cache may be cold on restart.
 	query := `
 		SELECT m.ts, m.value
 		FROM metrics m
@@ -438,17 +477,12 @@ func (s *Storage) queryRaw(ctx context.Context, p QueryRangeParams) ([]DataPoint
 	return pts, rows.Err()
 }
 
-// queryRollup reads from metrics_rollup_1m and applies time_bucket() so the
-// response is already bucketed at the requested step size.
-// Averages use SUM(sum_val)/SUM(count_val) — never avg of avgs.
 func (s *Storage) queryRollup(ctx context.Context, p QueryRangeParams) ([]DataPoint, error) {
-	// Map the Step string to a Postgres interval literal.
 	interval, err := stepToInterval(p.Step)
 	if err != nil {
 		return nil, err
 	}
 
-	// Choose the aggregation expression. For "avg" we use sum/count math.
 	var aggExpr string
 	switch p.Agg {
 	case "min":
@@ -457,7 +491,7 @@ func (s *Storage) queryRollup(ctx context.Context, p QueryRangeParams) ([]DataPo
 		aggExpr = "MAX(max_val)"
 	case "sum":
 		aggExpr = "SUM(sum_val)"
-	default: // "avg"
+	default:
 		aggExpr = "SUM(sum_val) / NULLIF(SUM(count_val), 0)"
 	}
 
@@ -492,7 +526,6 @@ func (s *Storage) queryRollup(ctx context.Context, p QueryRangeParams) ([]DataPo
 	return pts, rows.Err()
 }
 
-// stepToInterval converts our Step string to a Postgres interval string.
 func stepToInterval(step string) (string, error) {
 	switch step {
 	case "1m":
@@ -506,8 +539,6 @@ func stepToInterval(step string) (string, error) {
 	}
 }
 
-// QueryLatestValue returns just the scalar value and timestamp of the most
-// recent reading of a metric. Used by the SSE streaming handler.
 func (s *Storage) QueryLatestValue(ctx context.Context, hostID, metricName string) (float64, time.Time, error) {
 	query := `
 		SELECT m.value, m.ts

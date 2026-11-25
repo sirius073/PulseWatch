@@ -235,6 +235,30 @@ func (w *WAL) Append(batch *pulsewatchv1.MetricBatch) error {
 	return nil
 }
 
+// MaxSequence returns the highest batch sequence number recorded across WAL segments.
+func (w *WAL) MaxSequence() (uint64, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.activeFile != nil {
+		_ = w.activeFile.Sync()
+	}
+
+	var maxSeq uint64
+	for _, segID := range w.segments {
+		batches, err := readSegment(w.segmentPath(segID))
+		if err != nil {
+			return 0, fmt.Errorf("error reading segment %d for max seq: %w", segID, err)
+		}
+		for _, b := range batches {
+			if b.Seq > maxSeq {
+				maxSeq = b.Seq
+			}
+		}
+	}
+	return maxSeq, nil
+}
+
 // ReplayAll reads all stored batches across all segments in sequence.
 // Used when recovering connection to replay buffered metrics.
 func (w *WAL) ReplayAll() ([]*pulsewatchv1.MetricBatch, error) {

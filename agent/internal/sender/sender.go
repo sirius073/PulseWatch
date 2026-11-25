@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	pulsewatchv1 "pulsewatch/proto/v1"
@@ -69,10 +70,14 @@ func (s *Sender) Close() error {
 	return s.grpcConn.Close()
 }
 
-// NextSeq increments and returns the next monotonic sequence number for this host.
+// NextSeq atomically increments and returns the next monotonic sequence number for this host.
 func (s *Sender) NextSeq() uint64 {
-	s.currentSeq++
-	return s.currentSeq
+	return atomic.AddUint64(&s.currentSeq, 1)
+}
+
+// SetSeq sets the sequence baseline so the next call to NextSeq returns seq + 1.
+func (s *Sender) SetSeq(seq uint64) {
+	atomic.StoreUint64(&s.currentSeq, seq)
 }
 
 // SendBatch packages fresh points with a new sequence number and sends them.
